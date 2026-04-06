@@ -105,10 +105,14 @@ func NewServer(config *Config) (http.Handler, error) {
 		config.Logger.Infof("fleetlock: maintenance window %s - %s UTC", config.MaintenanceWindowStart, config.MaintenanceWindowEnd)
 	}
 
-	// slack notifier
+	// slack notifier (env var overrides CLI flag for the bot token)
+	slackBotToken := config.SlackBotToken
+	if v := os.Getenv("SLACK_BOT_TOKEN"); v != "" {
+		slackBotToken = v
+	}
 	var slackNotifier *SlackNotifier
-	if config.SlackBotToken != "" && config.SlackChannelID != "" {
-		slackNotifier = NewSlackNotifier(config.SlackBotToken, config.SlackChannelID, config.Logger)
+	if slackBotToken != "" && config.SlackChannelID != "" {
+		slackNotifier = NewSlackNotifier(slackBotToken, config.SlackChannelID, config.Logger)
 		config.Logger.Info("fleetlock: Slack notifications enabled")
 	}
 
