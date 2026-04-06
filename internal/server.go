@@ -194,6 +194,9 @@ func (s *Server) lock(w http.ResponseWriter, req *http.Request) {
 
 	fields["holder"] = lock.Holder
 
+	// resolve Zincati ID to Kubernetes node name (best effort)
+	nodeName := s.resolveNodeName(ctx, id)
+
 	// reboot lease already owned by node
 	if lock.Holder == id {
 		s.log.WithFields(fields).Info("fleetlock: retained reboot lease")
@@ -218,7 +221,7 @@ func (s *Server) lock(w http.ResponseWriter, req *http.Request) {
 			s.log.WithFields(fields).Info("fleetlock: obtained reboot lease")
 			s.metrics.lockState.With(prometheus.Labels{"group": group}).Set(1)
 			fmt.Fprintf(w, "obtained reboot lease")
-			s.notifySlack("lock_granted", group, id)
+			s.notifySlack("lock_granted", group, nodeName)
 
 			// best effort, do not gate on drain succeeding
 			_ = s.DrainNode(ctx, id)
@@ -291,7 +294,8 @@ func (s *Server) unlock(w http.ResponseWriter, req *http.Request) {
 		s.metrics.lockTransitions.With(prometheus.Labels{"group": group}).Inc()
 		s.log.WithFields(fields).Info("fleetlock: unlocked reboot lease")
 		fmt.Fprintf(w, "unlocked reboot lease for %s", lock.Holder)
-		s.notifySlack("lock_released", group, id)
+		nodeName := s.resolveNodeName(ctx, id)
+		s.notifySlack("lock_released", group, nodeName)
 		return
 	}
 
@@ -306,6 +310,17 @@ func (s *Server) unlock(w http.ResponseWriter, req *http.Request) {
 	s.log.WithFields(fields).Info("fleetlock: reboot lease unlock unavailable")
 	s.metrics.lockState.With(prometheus.Labels{"group": group}).Set(1)
 	encodeReply(w, NewReply(KindLockHeld, "reboot lease unlock unavailable, held by %s", lock.Holder))
+}
+
+// resolveNodeName resolves a Zincati ID to a Kubernetes node name.
+// Returns the node name on success, or the raw Zincati ID as fallback.
+func (s *Server) resolveNodeName(ctx context.Context, id string) string {
+	node, err := s.matchNode(ctx, id)
+	if err != nil {
+		s.log.Debugf("fleetlock: could not resolve node name for %s: %v", id, err)
+		return id
+	}
+	return node.GetName()
 }
 
 // healthHandler handles liveness checks with an ok status response.

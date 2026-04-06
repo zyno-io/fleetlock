@@ -65,8 +65,9 @@ func (s *SlackNotifier) Notify(text string) error {
 }
 
 // notifySlack sends a Slack notification for lock events. It is best-effort
-// and logs errors rather than returning them.
-func (s *Server) notifySlack(event, group, nodeID string) {
+// and logs errors rather than returning them. The nodeName should be the
+// resolved Kubernetes node name (falls back to Zincati ID if resolution fails).
+func (s *Server) notifySlack(event, group, nodeName string) {
 	if s.slackNotifier == nil {
 		return
 	}
@@ -74,11 +75,11 @@ func (s *Server) notifySlack(event, group, nodeID string) {
 	var text string
 	switch event {
 	case "lock_granted":
-		text = fmt.Sprintf(":lock: Reboot lock *granted* for node `%s` in group `%s`", nodeID, group)
+		text = fmt.Sprintf(":lock: Reboot lock *granted* for node `%s` in group `%s`", nodeName, group)
 	case "lock_released":
-		text = fmt.Sprintf(":unlock: Reboot lock *released* for node `%s` in group `%s`", nodeID, group)
+		text = fmt.Sprintf(":unlock: Reboot lock *released* for node `%s` in group `%s`", nodeName, group)
 	default:
-		text = fmt.Sprintf("Reboot lock event `%s` for node `%s` in group `%s`", event, nodeID, group)
+		text = fmt.Sprintf("Reboot lock event `%s` for node `%s` in group `%s`", event, nodeName, group)
 	}
 
 	go func() {
