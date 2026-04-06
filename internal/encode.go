@@ -8,11 +8,12 @@ import (
 
 // List of ReplyKind
 const (
-	KindMethodNotAllowed ReplyKind = "method_not_allowed"
-	KindMissingHeader    ReplyKind = "missing_header"
-	KindDecodeError      ReplyKind = "decode_error"
-	KindInternalError    ReplyKind = "internal_error"
-	KindLockHeld         ReplyKind = "lock_held"
+	KindMethodNotAllowed    ReplyKind = "method_not_allowed"
+	KindMissingHeader       ReplyKind = "missing_header"
+	KindDecodeError         ReplyKind = "decode_error"
+	KindInternalError       ReplyKind = "internal_error"
+	KindLockHeld            ReplyKind = "lock_held"
+	KindOutsideWindow       ReplyKind = "outside_maintenance_window"
 )
 
 // ReplyKind is used as a Zincati metrics label.
@@ -48,6 +49,8 @@ func encodeReply(w http.ResponseWriter, reply Reply) error {
 		w.WriteHeader(http.StatusInternalServerError)
 	case KindLockHeld:
 		w.WriteHeader(http.StatusLocked)
+	case KindOutsideWindow:
+		w.WriteHeader(http.StatusForbidden)
 	default:
 		w.WriteHeader(http.StatusOK)
 	}

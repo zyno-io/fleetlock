@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -19,6 +20,16 @@ import (
 type Config struct {
 	// logger
 	Logger *logrus.Logger
+	// DrainMaxWait is the maximum duration to wait for pod evictions during drain.
+	DrainMaxWait time.Duration
+	// MaintenanceWindowStart is the start time of the allowed maintenance window (HH:MM format, UTC).
+	MaintenanceWindowStart string
+	// MaintenanceWindowEnd is the end time of the allowed maintenance window (HH:MM format, UTC).
+	MaintenanceWindowEnd string
+	// SlackBotToken is the Slack Bot User OAuth Token for sending notifications.
+	SlackBotToken string
+	// SlackChannelID is the Slack channel ID to post lock/unlock notifications.
+	SlackChannelID string
 }
 
 // Server implements the FleetLock protocol.
@@ -31,6 +42,16 @@ type Server struct {
 	// Kubernetes
 	namespace  string
 	kubeClient kubernetes.Interface
+
+	// drain config
+	drainMaxWait time.Duration
+
+	// maintenance window (parsed HH:MM in UTC)
+	maintenanceStart *maintenanceTime
+	maintenanceEnd   *maintenanceTime
+
+	// slack notifications
+	slackNotifier *SlackNotifier
 }
 
 // NewServer returns a new fleetlock Server handler
@@ -70,11 +91,45 @@ func NewServer(config *Config) (http.Handler, error) {
 		return nil, fmt.Errorf("fleetlock: register metrics error: %v", err)
 	}
 
+	// parse maintenance window times
+	var mStart, mEnd *maintenanceTime
+	if config.MaintenanceWindowStart != "" && config.MaintenanceWindowEnd != "" {
+		mStart, err = parseMaintenanceTime(config.MaintenanceWindowStart)
+		if err != nil {
+			return nil, fmt.Errorf("fleetlock: invalid maintenance-window-start: %v", err)
+		}
+		mEnd, err = parseMaintenanceTime(config.MaintenanceWindowEnd)
+		if err != nil {
+			return nil, fmt.Errorf("fleetlock: invalid maintenance-window-end: %v", err)
+		}
+		config.Logger.Infof("fleetlock: maintenance window %s - %s UTC", config.MaintenanceWindowStart, config.MaintenanceWindowEnd)
+	}
+
+	// slack notifier (env var overrides CLI flag for the bot token)
+	slackBotToken := config.SlackBotToken
+	if v := os.Getenv("SLACK_BOT_TOKEN"); v != "" {
+		slackBotToken = v
+	}
+	var slackNotifier *SlackNotifier
+	if slackBotToken != "" && config.SlackChannelID != "" {
+		slackNotifier = NewSlackNotifier(slackBotToken, config.SlackChannelID, config.Logger)
+		config.Logger.Info("fleetlock: Slack notifications enabled")
+	}
+
+	drainMaxWait := config.DrainMaxWait
+	if drainMaxWait == 0 {
+		drainMaxWait = 60 * time.Second
+	}
+
 	s := &Server{
-		log:        config.Logger,
-		metrics:    metrics,
-		namespace:  namespace,
-		kubeClient: kubeClient,
+		log:              config.Logger,
+		metrics:          metrics,
+		namespace:        namespace,
+		kubeClient:       kubeClient,
+		drainMaxWait:     drainMaxWait,
+		maintenanceStart: mStart,
+		maintenanceEnd:   mEnd,
+		slackNotifier:    slackNotifier,
 	}
 
 	mux := http.NewServeMux()
@@ -120,6 +175,16 @@ func (s *Server) lock(w http.ResponseWriter, req *http.Request) {
 	s.log.WithFields(fields).Info("fleetlock: attempt reboot lease lock")
 	s.metrics.lockRequests.Inc()
 
+	// check maintenance window
+	if s.maintenanceStart != nil && s.maintenanceEnd != nil {
+		if !inMaintenanceWindow(time.Now().UTC(), s.maintenanceStart, s.maintenanceEnd) {
+			s.log.WithFields(fields).Info("fleetlock: lock denied, outside maintenance window")
+			encodeReply(w, NewReply(KindOutsideWindow, "lock denied: outside maintenance window (%02d:%02d - %02d:%02d UTC)",
+				s.maintenanceStart.hour, s.maintenanceStart.minute, s.maintenanceEnd.hour, s.maintenanceEnd.minute))
+			return
+		}
+	}
+
 	// get or create a reboot lease
 	ctx := context.Background()
 	lock, err := rebootLease.Get(ctx)
@@ -132,6 +197,9 @@ func (s *Server) lock(w http.ResponseWriter, req *http.Request) {
 	}
 
 	fields["holder"] = lock.Holder
+
+	// resolve Zincati ID to Kubernetes node name (best effort)
+	nodeName := s.resolveNodeName(ctx, id)
 
 	// reboot lease already owned by node
 	if lock.Holder == id {
@@ -157,6 +225,7 @@ func (s *Server) lock(w http.ResponseWriter, req *http.Request) {
 			s.log.WithFields(fields).Info("fleetlock: obtained reboot lease")
 			s.metrics.lockState.With(prometheus.Labels{"group": group}).Set(1)
 			fmt.Fprintf(w, "obtained reboot lease")
+			s.notifySlack("lock_granted", group, nodeName)
 
 			// best effort, do not gate on drain succeeding
 			_ = s.DrainNode(ctx, id)
@@ -229,6 +298,8 @@ func (s *Server) unlock(w http.ResponseWriter, req *http.Request) {
 		s.metrics.lockTransitions.With(prometheus.Labels{"group": group}).Inc()
 		s.log.WithFields(fields).Info("fleetlock: unlocked reboot lease")
 		fmt.Fprintf(w, "unlocked reboot lease for %s", lock.Holder)
+		nodeName := s.resolveNodeName(ctx, id)
+		s.notifySlack("lock_released", group, nodeName)
 		return
 	}
 
@@ -243,6 +314,17 @@ func (s *Server) unlock(w http.ResponseWriter, req *http.Request) {
 	s.log.WithFields(fields).Info("fleetlock: reboot lease unlock unavailable")
 	s.metrics.lockState.With(prometheus.Labels{"group": group}).Set(1)
 	encodeReply(w, NewReply(KindLockHeld, "reboot lease unlock unavailable, held by %s", lock.Holder))
+}
+
+// resolveNodeName resolves a Zincati ID to a Kubernetes node name.
+// Returns the node name on success, or the raw Zincati ID as fallback.
+func (s *Server) resolveNodeName(ctx context.Context, id string) string {
+	node, err := s.matchNode(ctx, id)
+	if err != nil {
+		s.log.Debugf("fleetlock: could not resolve node name for %s: %v", id, err)
+		return id
+	}
+	return node.GetName()
 }
 
 // healthHandler handles liveness checks with an ok status response.

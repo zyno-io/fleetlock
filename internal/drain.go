@@ -21,8 +21,9 @@ func (s *Server) DrainNode(ctx context.Context, id string) error {
 	}
 
 	drainer := drain.New(&drain.Config{
-		Client: s.kubeClient,
-		Logger: s.log,
+		Client:       s.kubeClient,
+		Logger:       s.log,
+		DrainMaxWait: s.drainMaxWait,
 	})
 	return drainer.Drain(ctx, node.GetName())
 }

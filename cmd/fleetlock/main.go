@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -19,15 +20,25 @@ var (
 
 func main() {
 	flags := struct {
-		address  string
-		logLevel string
-		version  bool
-		help     bool
+		address                string
+		logLevel               string
+		drainMaxWait           time.Duration
+		maintenanceWindowStart string
+		maintenanceWindowEnd   string
+		slackBotToken          string
+		slackChannelID         string
+		version                bool
+		help                   bool
 	}{}
 
 	flag.StringVar(&flags.address, "address", "0.0.0.0:8080", "HTTP listen address")
 	// log levels https://github.com/sirupsen/logrus/blob/master/logrus.go#L36
 	flag.StringVar(&flags.logLevel, "log-level", "info", "Set the logging level")
+	flag.DurationVar(&flags.drainMaxWait, "drain-max-wait", 60*time.Second, "Maximum time to wait for pod evictions during drain")
+	flag.StringVar(&flags.maintenanceWindowStart, "maintenance-window-start", "", "Start of maintenance window in HH:MM format (UTC)")
+	flag.StringVar(&flags.maintenanceWindowEnd, "maintenance-window-end", "", "End of maintenance window in HH:MM format (UTC)")
+	flag.StringVar(&flags.slackBotToken, "slack-bot-token", "", "Slack Bot User OAuth Token for notifications")
+	flag.StringVar(&flags.slackChannelID, "slack-channel-id", "", "Slack channel ID for lock/unlock notifications")
 	// subcommands
 	flag.BoolVar(&flags.version, "version", false, "Print version and exit")
 	flag.BoolVar(&flags.help, "help", false, "Print usage and exit")
@@ -54,7 +65,12 @@ func main() {
 
 	// HTTP Server
 	config := &fleetlock.Config{
-		Logger: log,
+		Logger:                 log,
+		DrainMaxWait:           flags.drainMaxWait,
+		MaintenanceWindowStart: flags.maintenanceWindowStart,
+		MaintenanceWindowEnd:   flags.maintenanceWindowEnd,
+		SlackBotToken:          flags.slackBotToken,
+		SlackChannelID:         flags.slackChannelID,
 	}
 	server, err := fleetlock.NewServer(config)
 	if err != nil {
