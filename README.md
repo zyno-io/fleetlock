@@ -47,6 +47,11 @@ Configure the server via flags.
 |------------|--------------|--------------|
 | -address   | HTTP listen address | 0.0.0.0:8080 |
 | -log-level | Logger level | info |
+| -drain-max-wait | Maximum time to wait for pod evictions during drain | 60s |
+| -maintenance-window-start | Start of maintenance window in HH:MM format (UTC) | (none) |
+| -maintenance-window-end | End of maintenance window in HH:MM format (UTC) | (none) |
+| -slack-bot-token | Slack Bot User OAuth Token for notifications | (none) |
+| -slack-channel-id | Slack channel ID for lock/unlock notifications | (none) |
 | -version   | Show version | NA   |
 | -help      | Show help    | NA   |
 
@@ -56,6 +61,29 @@ Or via environment variables.
 |------------|------------------------|-----------|
 | NAMESPACE  | Kubernetes Namespace   | "default" |
 | KUBECONFIG | Development Kubeconfig | NA        |
+| SLACK_BOT_TOKEN | Slack Bot User OAuth Token (overrides -slack-bot-token flag) | NA |
+
+#### Maintenance Windows
+
+When `-maintenance-window-start` and `-maintenance-window-end` are both set, lock requests outside the window are denied with HTTP 403. Cross-midnight windows are supported (e.g. `22:00` to `06:00`). Times are in UTC.
+
+```
+./bin/fleetlock -maintenance-window-start 02:00 -maintenance-window-end 06:00
+```
+
+#### Slack Notifications
+
+When a Slack bot token and channel ID are configured, fleetlock posts notifications on lock grants and releases. The message includes the resolved Kubernetes node name.
+
+```
+./bin/fleetlock -slack-channel-id C0123ABCDEF
+```
+
+Set the bot token via environment variable to avoid exposing it in process arguments:
+
+```
+export SLACK_BOT_TOKEN=xoxb-...
+```
 
 ### Typhoon
 
