@@ -3,6 +3,8 @@ package drain
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"k8s.io/api/core/v1"
@@ -13,10 +15,14 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
+// DefaultDrainMaxWait is the default maximum time to wait for pods to be evicted.
+const DefaultDrainMaxWait = 60 * time.Second
+
 // Config configures a Drainer.
 type Config struct {
-	Client kubernetes.Interface
-	Logger *logrus.Logger
+	Client       kubernetes.Interface
+	Logger       *logrus.Logger
+	DrainMaxWait time.Duration
 }
 
 // Drainer manages cordoning nodes and evicting Pods.
@@ -31,16 +37,22 @@ type Drainer interface {
 
 // New returns a new Drainer.
 func New(config *Config) Drainer {
+	maxWait := config.DrainMaxWait
+	if maxWait == 0 {
+		maxWait = DefaultDrainMaxWait
+	}
 	return &drainer{
-		client: config.Client,
-		log:    config.Logger,
+		client:       config.Client,
+		log:          config.Logger,
+		drainMaxWait: maxWait,
 	}
 }
 
 // drain is a Kubernetes node cordon and drainer.
 type drainer struct {
-	client kubernetes.Interface
-	log    *logrus.Logger
+	client       kubernetes.Interface
+	log          *logrus.Logger
+	drainMaxWait time.Duration
 }
 
 // Cordon marks a Kubernetes Node as unschedulable.
@@ -74,6 +86,7 @@ func (d *drainer) Drain(ctx context.Context, node string) error {
 		return err
 	}
 
+	evictedPods := []string{}
 	for _, pod := range pods {
 		fields["pod"] = pod.GetName()
 		d.log.WithFields(fields).Info("drainer: evicting pod")
@@ -82,6 +95,44 @@ func (d *drainer) Drain(ctx context.Context, node string) error {
 		if err != nil {
 			d.log.WithFields(fields).Errorf("drainer: error evicting pod: %v", err)
 			return err
+		}
+		evictedPods = append(evictedPods, pod.GetName())
+	}
+
+	// Wait for evicted pods to terminate
+	start := time.Now()
+	for len(evictedPods) > 0 {
+		podsDescription := ""
+		if len(evictedPods) > 5 {
+			podsDescription = strings.Join(evictedPods[:5], ", ") + " ..."
+		} else {
+			podsDescription = strings.Join(evictedPods, ", ")
+		}
+		d.log.WithFields(fields).Infof("drainer: waiting for %d pods to be evicted: %s", len(evictedPods), podsDescription)
+
+		if time.Since(start) > d.drainMaxWait {
+			d.log.WithFields(fields).Infof("drainer: waited maximum amount of time for evictions, continuing")
+			break
+		}
+
+		pods, err := d.getPodsForDeletion(ctx, node)
+		if err != nil {
+			d.log.WithFields(fields).Errorf("drainer: error getting pods: %v", err)
+			return err
+		}
+		podsByName := make(map[string]struct{}, len(pods))
+		for _, pod := range pods {
+			podsByName[pod.GetName()] = struct{}{}
+		}
+		remainingPods := []string{}
+		for _, pod := range evictedPods {
+			if _, ok := podsByName[pod]; ok {
+				remainingPods = append(remainingPods, pod)
+			}
+		}
+		evictedPods = remainingPods
+		if len(evictedPods) > 0 {
+			time.Sleep(1 * time.Second)
 		}
 	}
 
