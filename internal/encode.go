@@ -8,12 +8,12 @@ import (
 
 // List of ReplyKind
 const (
-	KindMethodNotAllowed    ReplyKind = "method_not_allowed"
-	KindMissingHeader       ReplyKind = "missing_header"
-	KindDecodeError         ReplyKind = "decode_error"
-	KindInternalError       ReplyKind = "internal_error"
-	KindLockHeld            ReplyKind = "lock_held"
-	KindOutsideWindow       ReplyKind = "outside_maintenance_window"
+	KindMethodNotAllowed ReplyKind = "method_not_allowed"
+	KindMissingHeader    ReplyKind = "missing_header"
+	KindDecodeError      ReplyKind = "decode_error"
+	KindInternalError    ReplyKind = "internal_error"
+	KindLockHeld         ReplyKind = "lock_held"
+	KindOutsideWindow    ReplyKind = "outside_maintenance_window"
 )
 
 // ReplyKind is used as a Zincati metrics label.
