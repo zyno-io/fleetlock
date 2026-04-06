@@ -8,5 +8,3 @@ jobs:
     uses: ./.github/workflows/multiarch.yaml
     permissions:
       packages: write
-    secrets:
-      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}

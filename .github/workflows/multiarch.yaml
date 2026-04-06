@@ -1,10 +1,6 @@
 name: multiarch
 on:
   workflow_call:
-    secrets:
-      QUAY_TOKEN:
-        description: 'Quay Registry push token'
-        required: false
 
 env:
   GHCR_REPO: ghcr.io/${{ github.repository }}
@@ -17,7 +13,6 @@ jobs:
     permissions:
       packages: write
     steps:
-      # Checkout repo to GitHub Actions runner
       - name: Checkout
         uses: actions/checkout@v6
         with:
@@ -26,24 +21,12 @@ jobs:
       - name: Build Image
         run: make image-amd64
 
-      - name: Quay Token
-        if: env.QUAY_TOKEN != null
-        env:
-          QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
-        run: |
-          buildah login -u "poseidon+github" -p "$QUAY_TOKEN" quay.io
-
-      - name: Push Image (Quay)
-        if: github.ref == 'refs/heads/main'
-        run: |
-          make push-amd64
-
       - name: GHCR Login
         if: github.ref == 'refs/heads/fork'
         run: |
           buildah login -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}" ghcr.io
 
-      - name: Push Image (GHCR)
+      - name: Push Image
         if: github.ref == 'refs/heads/fork'
         run: |
           VERSION=$(git describe --tags --match=v* --always --dirty)
@@ -57,7 +40,6 @@ jobs:
     permissions:
       packages: write
     steps:
-      # Checkout repo to GitHub Actions runner
       - name: Checkout
         uses: actions/checkout@v6
         with:
@@ -66,24 +48,12 @@ jobs:
       - name: Build Image
         run: make image-arm64
 
-      - name: Quay Token
-        if: env.QUAY_TOKEN != null
-        env:
-          QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
-        run: |
-          buildah login -u "poseidon+github" -p "$QUAY_TOKEN" quay.io
-
-      - name: Push Image (Quay)
-        if: github.ref == 'refs/heads/main'
-        run: |
-          make push-arm64
-
       - name: GHCR Login
         if: github.ref == 'refs/heads/fork'
         run: |
           buildah login -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}" ghcr.io
 
-      - name: Push Image (GHCR)
+      - name: Push Image
         if: github.ref == 'refs/heads/fork'
         run: |
           VERSION=$(git describe --tags --match=v* --always --dirty)
@@ -93,37 +63,23 @@ jobs:
   manifest:
     name: manifest
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fork'
+    if: github.ref == 'refs/heads/fork'
     needs:
       - build-amd64
       - build-arm64
     permissions:
       packages: write
     steps:
-      # Checkout repo to GitHub Actions runner
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Quay Token
-        if: env.QUAY_TOKEN != null
-        env:
-          QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
-        run: |
-          buildah login -u "poseidon+github" -p "$QUAY_TOKEN" quay.io
-
-      - name: Push Multi-Arch (Quay)
-        if: github.ref == 'refs/heads/main'
-        run: make manifest
-
       - name: GHCR Login
-        if: github.ref == 'refs/heads/fork'
         run: |
           buildah login -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}" ghcr.io
 
-      - name: Push Multi-Arch (GHCR)
-        if: github.ref == 'refs/heads/fork'
+      - name: Push Multi-Arch
         run: |
           VERSION=$(git describe --tags --match=v* --always --dirty)
           buildah manifest create ${GHCR_REPO}:${VERSION}
