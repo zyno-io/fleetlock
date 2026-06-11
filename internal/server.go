@@ -30,6 +30,10 @@ type Config struct {
 	SlackBotToken string
 	// SlackChannelID is the Slack channel ID to post lock/unlock notifications.
 	SlackChannelID string
+	// LockCooldown is the minimum duration to wait after a node reboots and
+	// unlocks before granting the next reboot lock, giving rebooted nodes time
+	// to recover their pods. Zero disables the cooldown.
+	LockCooldown time.Duration
 }
 
 // Server implements the FleetLock protocol.
@@ -45,6 +49,9 @@ type Server struct {
 
 	// drain config
 	drainMaxWait time.Duration
+
+	// post-reboot cooldown before granting the next lock
+	lockCooldown time.Duration
 
 	// maintenance window (parsed HH:MM in UTC)
 	maintenanceStart *maintenanceTime
@@ -121,12 +128,17 @@ func NewServer(config *Config) (http.Handler, error) {
 		drainMaxWait = 60 * time.Second
 	}
 
+	if config.LockCooldown > 0 {
+		config.Logger.Infof("fleetlock: post-reboot lock cooldown %s", config.LockCooldown)
+	}
+
 	s := &Server{
 		log:              config.Logger,
 		metrics:          metrics,
 		namespace:        namespace,
 		kubeClient:       kubeClient,
 		drainMaxWait:     drainMaxWait,
+		lockCooldown:     config.LockCooldown,
 		maintenanceStart: mStart,
 		maintenanceEnd:   mEnd,
 		slackNotifier:    slackNotifier,
@@ -198,8 +210,12 @@ func (s *Server) lock(w http.ResponseWriter, req *http.Request) {
 
 	fields["holder"] = lock.Holder
 
-	// resolve Zincati ID to Kubernetes node name (best effort)
-	nodeName := s.resolveNodeName(ctx, id)
+	// match the Zincati ID to a Kubernetes node (best effort)
+	node, _ := s.matchNode(ctx, id)
+	nodeName := id
+	if node != nil {
+		nodeName = node.GetName()
+	}
 
 	// reboot lease already owned by node
 	if lock.Holder == id {
@@ -214,11 +230,24 @@ func (s *Server) lock(w http.ResponseWriter, req *http.Request) {
 
 	// reboot lease available
 	if lock.Holder == "" {
+		// enforce the post-reboot cooldown so a node that just rebooted has
+		// time to recover its pods before the next node is allowed to reboot
+		now := time.Now().UTC()
+		if withinCooldown(lock.LastUnlock, now, s.lockCooldown) {
+			remaining := (s.lockCooldown - now.Sub(lock.LastUnlock)).Round(time.Second)
+			s.log.WithFields(fields).Infof("fleetlock: lock denied, reboot cooldown %s remaining", remaining)
+			s.metrics.cooldownDenials.With(prometheus.Labels{"group": group}).Inc()
+			encodeReply(w, NewReply(KindCooldown, "lock denied: reboot cooldown, retry in %s", remaining))
+			return
+		}
+
 		// obtain the reboot lease lock
 		s.log.WithFields(fields).Info("fleetlock: reboot lease available, attempt")
 		update := &RebootLock{
 			Holder:           id,
 			LeaseTransitions: lock.LeaseTransitions + 1,
+			// preserve the group's cooldown timestamp across the grant
+			LastUnlock: lock.LastUnlock,
 		}
 		err := rebootLease.Update(ctx, update)
 		if err == nil {
@@ -226,6 +255,16 @@ func (s *Server) lock(w http.ResponseWriter, req *http.Request) {
 			s.metrics.lockState.With(prometheus.Labels{"group": group}).Set(1)
 			fmt.Fprintf(w, "obtained reboot lease")
 			s.notifySlack("lock_granted", group, nodeName)
+
+			// record lock state on the node (best effort)
+			if node != nil {
+				if err := s.annotateNode(ctx, nodeName, map[string]string{
+					annotationLastLockTime: now.Format(time.RFC3339),
+					annotationState:        stateLocked,
+				}); err != nil {
+					s.log.WithFields(fields).Errorf("fleetlock: error annotating node: %v", err)
+				}
+			}
 
 			// best effort, do not gate on drain succeeding
 			_ = s.DrainNode(ctx, id)
@@ -281,11 +320,30 @@ func (s *Server) unlock(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
+		// match the node to record state and determine whether it actually
+		// rebooted during the lock window (best effort)
+		node, _ := s.matchNode(ctx, id)
+		nodeName := id
+		if node != nil {
+			nodeName = node.GetName()
+		}
+
+		// a node whose Ready condition transitioned after it acquired the lock
+		// went NotReady and recovered, i.e. it actually rebooted. Only then
+		// does the next node need to wait out the recovery cooldown.
+		rebooted := rebootedWithinLock(node, timeAnnotation(node, annotationLastLockTime))
+
 		// release reboot lease lock
 		s.log.WithFields(fields).Info("fleetlock: unlock reboot lease")
+		now := time.Now().UTC()
 		update := &RebootLock{
 			Holder:           "",
 			LeaseTransitions: lock.LeaseTransitions,
+			// preserve any prior cooldown; arm a fresh one only on a real reboot
+			LastUnlock: lock.LastUnlock,
+		}
+		if rebooted {
+			update.LastUnlock = now
 		}
 		err = rebootLease.Update(ctx, update)
 		if err != nil {
@@ -296,9 +354,22 @@ func (s *Server) unlock(w http.ResponseWriter, req *http.Request) {
 
 		s.metrics.lockState.With(prometheus.Labels{"group": group}).Set(0)
 		s.metrics.lockTransitions.With(prometheus.Labels{"group": group}).Inc()
-		s.log.WithFields(fields).Info("fleetlock: unlocked reboot lease")
+		if rebooted {
+			s.metrics.rebootWithinLock.With(prometheus.Labels{"group": group}).Inc()
+		}
+		s.log.WithFields(fields).WithField("rebooted", rebooted).Info("fleetlock: unlocked reboot lease")
 		fmt.Fprintf(w, "unlocked reboot lease for %s", lock.Holder)
-		nodeName := s.resolveNodeName(ctx, id)
+
+		// record unlock state on the node (best effort)
+		if node != nil {
+			if err := s.annotateNode(ctx, nodeName, map[string]string{
+				annotationLastUnlockTime: now.Format(time.RFC3339),
+				annotationState:          stateUnlocked,
+			}); err != nil {
+				s.log.WithFields(fields).Errorf("fleetlock: error annotating node: %v", err)
+			}
+		}
+
 		s.notifySlack("lock_released", group, nodeName)
 		return
 	}
@@ -314,17 +385,6 @@ func (s *Server) unlock(w http.ResponseWriter, req *http.Request) {
 	s.log.WithFields(fields).Info("fleetlock: reboot lease unlock unavailable")
 	s.metrics.lockState.With(prometheus.Labels{"group": group}).Set(1)
 	encodeReply(w, NewReply(KindLockHeld, "reboot lease unlock unavailable, held by %s", lock.Holder))
-}
-
-// resolveNodeName resolves a Zincati ID to a Kubernetes node name.
-// Returns the node name on success, or the raw Zincati ID as fallback.
-func (s *Server) resolveNodeName(ctx context.Context, id string) string {
-	node, err := s.matchNode(ctx, id)
-	if err != nil {
-		s.log.Debugf("fleetlock: could not resolve node name for %s: %v", id, err)
-		return id
-	}
-	return node.GetName()
 }
 
 // healthHandler handles liveness checks with an ok status response.

@@ -25,6 +25,7 @@ func main() {
 		drainMaxWait           time.Duration
 		maintenanceWindowStart string
 		maintenanceWindowEnd   string
+		lockCooldown           time.Duration
 		slackBotToken          string
 		slackChannelID         string
 		version                bool
@@ -37,6 +38,7 @@ func main() {
 	flag.DurationVar(&flags.drainMaxWait, "drain-max-wait", 60*time.Second, "Maximum time to wait for pod evictions during drain")
 	flag.StringVar(&flags.maintenanceWindowStart, "maintenance-window-start", "", "Start of maintenance window in HH:MM format (UTC)")
 	flag.StringVar(&flags.maintenanceWindowEnd, "maintenance-window-end", "", "End of maintenance window in HH:MM format (UTC)")
+	flag.DurationVar(&flags.lockCooldown, "lock-cooldown", 5*time.Minute, "Minimum wait after a node reboots/unlocks before granting the next lock (0 disables)")
 	flag.StringVar(&flags.slackBotToken, "slack-bot-token", "", "Slack Bot User OAuth Token for notifications")
 	flag.StringVar(&flags.slackChannelID, "slack-channel-id", "", "Slack channel ID for lock/unlock notifications")
 	// subcommands
@@ -69,6 +71,7 @@ func main() {
 		DrainMaxWait:           flags.drainMaxWait,
 		MaintenanceWindowStart: flags.maintenanceWindowStart,
 		MaintenanceWindowEnd:   flags.maintenanceWindowEnd,
+		LockCooldown:           flags.lockCooldown,
 		SlackBotToken:          flags.slackBotToken,
 		SlackChannelID:         flags.slackChannelID,
 	}

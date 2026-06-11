@@ -6,10 +6,12 @@ import (
 
 // fleetlock Prometheus metrics
 type metrics struct {
-	lockState       *prometheus.GaugeVec
-	lockTransitions *prometheus.GaugeVec
-	lockRequests    prometheus.Counter
-	unlockRequests  prometheus.Counter
+	lockState        *prometheus.GaugeVec
+	lockTransitions  *prometheus.GaugeVec
+	lockRequests     prometheus.Counter
+	unlockRequests   prometheus.Counter
+	cooldownDenials  *prometheus.CounterVec
+	rebootWithinLock *prometheus.CounterVec
 }
 
 // newMetrics creates fleetlock Prometheus metrics.
@@ -34,11 +36,23 @@ func newMetrics() *metrics {
 		Help: "Number of unlock requests",
 	})
 
+	cooldownDenials := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "fleetlock_cooldown_denial_count",
+		Help: "Number of lock requests denied due to the post-reboot cooldown",
+	}, []string{"group"})
+
+	rebootWithinLock := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "fleetlock_reboot_within_lock_count",
+		Help: "Number of unlocks where the node rebooted during its lock window",
+	}, []string{"group"})
+
 	return &metrics{
-		lockState:       lockState,
-		lockTransitions: lockTransitions,
-		lockRequests:    lockRequests,
-		unlockRequests:  unlockRequests,
+		lockState:        lockState,
+		lockTransitions:  lockTransitions,
+		lockRequests:     lockRequests,
+		unlockRequests:   unlockRequests,
+		cooldownDenials:  cooldownDenials,
+		rebootWithinLock: rebootWithinLock,
 	}
 }
 
@@ -49,6 +63,8 @@ func (m *metrics) Register(registry prometheus.Registerer) error {
 		m.lockTransitions,
 		m.lockRequests,
 		m.unlockRequests,
+		m.cooldownDenials,
+		m.rebootWithinLock,
 	}
 
 	return registerAll(registry, collectors...)

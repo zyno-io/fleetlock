@@ -3,6 +3,7 @@ package fleetlock
 import (
 	"context"
 	"fmt"
+	"time"
 
 	coordv1 "k8s.io/api/coordination/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -24,6 +25,10 @@ type RebootLease struct {
 type RebootLock struct {
 	Holder           string
 	LeaseTransitions int32
+	// LastUnlock is the time the group's lock was most recently released. It
+	// is persisted as a Lease annotation and used to enforce a post-reboot
+	// cooldown before the next lock is granted. Zero if never unlocked.
+	LastUnlock time.Time
 }
 
 // Name returns the RebootLease namespace and name.
@@ -55,17 +60,38 @@ func (l *RebootLease) Get(ctx context.Context) (*RebootLock, error) {
 		return nil, err
 	}
 
-	// decode the LeaseSpec
+	// decode the LeaseSpec and annotations
 	slot := leaseSpecToRebootLock(&l.lease.Spec)
+	slot.LastUnlock = leaseLastUnlock(l.lease)
 	return slot, nil
 }
 
 // Update tries to store the RebootLock into the the Lease.
 func (l *RebootLease) Update(ctx context.Context, slot *RebootLock) error {
 	l.lease.Spec = rebootLockToLeaseSpec(slot)
+	if !slot.LastUnlock.IsZero() {
+		if l.lease.Annotations == nil {
+			l.lease.Annotations = map[string]string{}
+		}
+		l.lease.Annotations[annotationLastUnlockTime] = slot.LastUnlock.UTC().Format(time.RFC3339)
+	}
 	var err error
 	l.lease, err = l.Client.Leases(l.Meta.Namespace).Update(ctx, l.lease, metav1.UpdateOptions{})
 	return err
+}
+
+// leaseLastUnlock reads the group's last unlock time from a Lease annotation,
+// returning the zero time if absent or malformed.
+func leaseLastUnlock(lease *coordv1.Lease) time.Time {
+	v, ok := lease.Annotations[annotationLastUnlockTime]
+	if !ok {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // rebootLockToLeaseSpec encodes a RebootLock into a LeaseSpec.

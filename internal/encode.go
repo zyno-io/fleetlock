@@ -14,6 +14,7 @@ const (
 	KindInternalError    ReplyKind = "internal_error"
 	KindLockHeld         ReplyKind = "lock_held"
 	KindOutsideWindow    ReplyKind = "outside_maintenance_window"
+	KindCooldown         ReplyKind = "reboot_cooldown"
 )
 
 // ReplyKind is used as a Zincati metrics label.
@@ -51,6 +52,8 @@ func encodeReply(w http.ResponseWriter, reply Reply) error {
 		w.WriteHeader(http.StatusLocked)
 	case KindOutsideWindow:
 		w.WriteHeader(http.StatusForbidden)
+	case KindCooldown:
+		w.WriteHeader(http.StatusTooManyRequests)
 	default:
 		w.WriteHeader(http.StatusOK)
 	}

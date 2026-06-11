@@ -50,6 +50,7 @@ Configure the server via flags.
 | -drain-max-wait | Maximum time to wait for pod evictions during drain | 60s |
 | -maintenance-window-start | Start of maintenance window in HH:MM format (UTC) | (none) |
 | -maintenance-window-end | End of maintenance window in HH:MM format (UTC) | (none) |
+| -lock-cooldown | Minimum wait after a node reboots/unlocks before granting the next lock (0 disables) | 5m |
 | -slack-bot-token | Slack Bot User OAuth Token for notifications | (none) |
 | -slack-channel-id | Slack channel ID for lock/unlock notifications | (none) |
 | -version   | Show version | NA   |
@@ -70,6 +71,28 @@ When `-maintenance-window-start` and `-maintenance-window-end` are both set, loc
 ```
 ./bin/fleetlock -maintenance-window-start 02:00 -maintenance-window-end 06:00
 ```
+
+#### Reboot Cooldown
+
+After a node reboots and releases its lock, fleetlock waits `-lock-cooldown` (default `5m`) before granting the next reboot lock, giving the rebooted node time to recover its pods. Requests during the cooldown are denied with HTTP 429 and a `reboot_cooldown` reply, so Zincati retries later.
+
+The cooldown is only armed when the node *actually rebooted* — detected by its Kubernetes `Ready` condition transitioning after the lock was acquired (it went `NotReady` and recovered). A lock that completes without a reboot does not start a cooldown. Set `-lock-cooldown 0` to disable.
+
+```
+./bin/fleetlock -lock-cooldown 5m
+```
+
+#### Node Attributes
+
+fleetlock records reboot lock state on each Node as annotations, for visibility (`kubectl get node -o jsonpath`):
+
+| annotation | description |
+|------------|-------------|
+| `fleetlock.poseidon.coreos.com/state` | `locked` or `unlocked` |
+| `fleetlock.poseidon.coreos.com/last-lock-time` | RFC3339 UTC time the lock was last granted |
+| `fleetlock.poseidon.coreos.com/last-unlock-time` | RFC3339 UTC time the lock was last released |
+
+The group's most recent reboot-unlock time is also stored as a `last-unlock-time` annotation on the `fleetlock-<group>` Lease, where it drives the cooldown.
 
 #### Slack Notifications
 
@@ -122,6 +145,8 @@ $ kubectl delete lease fleetlock-default
 | fleetlock_lock_transition_count | Number of fleetlock lease transitions    |
 | fleetlock_lock_request_count   | Number of lock requests   |
 | fleetlock_unlock_request_count | Number of unlock requests |
+| fleetlock_cooldown_denial_count | Number of lock requests denied due to the post-reboot cooldown |
+| fleetlock_reboot_within_lock_count | Number of unlocks where the node rebooted during its lock window |
 
 ## Development
 
